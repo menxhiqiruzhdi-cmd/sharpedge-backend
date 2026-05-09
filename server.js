@@ -16,12 +16,16 @@ app.options("*", cors());
 const limiter = rateLimit({ windowMs: 60 * 1000, max: 60, message: { error: "Too many requests." } });
 app.use("/api/", limiter);
 
-// Cache — 30 minutes to save API credits
+// Cache 30 minutes to save API credits
 let oddsCache = { data: null, lastFetched: 0 };
 const CACHE_TTL = 30 * 60 * 1000;
 
-// All sports in ONE comma-separated string — 1 API call instead of 12
-const SPORTS = "americanfootball_nfl,basketball_nba,baseball_mlb,icehockey_nhl,soccer_epl,soccer_spain_la_liga,soccer_germany_bundesliga,soccer_italy_serie_a,soccer_france_ligue_one,soccer_usa_mls,soccer_uefa_champs_league,mma_mixed_martial_arts";
+const SPORTS = [
+  "americanfootball_nfl", "basketball_nba", "baseball_mlb", "icehockey_nhl",
+  "soccer_epl", "soccer_spain_la_liga", "soccer_germany_bundesliga",
+  "soccer_italy_serie_a", "soccer_france_ligue_one", "soccer_usa_mls",
+  "soccer_uefa_champs_league", "mma_mixed_martial_arts",
+];
 
 const SPORT_LABELS = {
   americanfootball_nfl:"NFL", basketball_nba:"NBA", baseball_mlb:"MLB",
@@ -33,54 +37,52 @@ const SPORT_LABELS = {
 
 async function fetchLiveOdds() {
   const now = Date.now();
-  if (oddsCache.data && now - oddsCache.lastFetched < CACHE_TTL) return oddsCache.data;
+  if (oddsCache.data && now - oddsCache.lastFetched < CACHE_TTL) {
+    console.log("Returning cached odds");
+    return oddsCache.data;
+  }
   if (!process.env.ODDS_API_KEY) throw new Error("ODDS_API_KEY not configured");
 
-  try {
-    // ONE single API call for all sports
-    const url = `https://api.the-odds-api.com/v4/odds/?apiKey=${process.env.ODDS_API_KEY}&regions=us&markets=h2h,spreads,totals&oddsFormat=american&dateFormat=iso&sports=${SPORTS}`;
-    const res = await fetch(url);
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.message || "Odds API error");
-    }
-    const games = await res.json();
-    const allGames = [];
-
-    games.forEach(game => {
-      const sport = SPORT_LABELS[game.sport_key] || game.sport_key;
-      const book = game.bookmakers?.find(b => b.key === "draftkings" || b.key === "fanduel") || game.bookmakers?.[0];
-      if (!book) return;
-
-      const h2h = book.markets?.find(m => m.key === "h2h");
-      const spread = book.markets?.find(m => m.key === "spreads");
-      const total = book.markets?.find(m => m.key === "totals");
-      const homeML = h2h?.outcomes?.find(o => o.name === game.home_team)?.price;
-      const awayML = h2h?.outcomes?.find(o => o.name === game.away_team)?.price;
-      const homeSpread = spread?.outcomes?.find(o => o.name === game.home_team);
-      const overTotal = total?.outcomes?.find(o => o.name === "Over");
-      const gameTime = new Date(game.commence_time);
-      const isLive = gameTime < new Date();
-
-      allGames.push({
-        id: game.id, sport,
-        status: isLive ? "LIVE" : "UPCOMING",
-        time: isLive ? "LIVE" : gameTime.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZoneName: "short" }),
-        home: game.home_team, away: game.away_team,
-        homeML: homeML ? (homeML > 0 ? `+${homeML}` : `${homeML}`) : "N/A",
-        awayML: awayML ? (awayML > 0 ? `+${awayML}` : `${awayML}`) : "N/A",
-        spread: homeSpread ? `${game.home_team.split(" ").pop()} ${homeSpread.point > 0 ? "+" : ""}${homeSpread.point}` : "N/A",
-        total: overTotal ? `O/U ${overTotal.point}` : "N/A",
+  const allGames = [];
+  for (const sport of SPORTS) {
+    try {
+      const url = `https://api.the-odds-api.com/v4/sports/${sport}/odds/?apiKey=${process.env.ODDS_API_KEY}&regions=us&markets=h2h,spreads,totals&oddsFormat=american&dateFormat=iso`;
+      const res = await fetch(url);
+      if (!res.ok) {
+        const text = await res.text();
+        console.error(`Error fetching ${sport}:`, text);
+        continue;
+      }
+      const games = await res.json();
+      games.forEach(game => {
+        const book = game.bookmakers?.find(b => b.key === "draftkings" || b.key === "fanduel") || game.bookmakers?.[0];
+        if (!book) return;
+        const h2h = book.markets?.find(m => m.key === "h2h");
+        const spread = book.markets?.find(m => m.key === "spreads");
+        const total = book.markets?.find(m => m.key === "totals");
+        const homeML = h2h?.outcomes?.find(o => o.name === game.home_team)?.price;
+        const awayML = h2h?.outcomes?.find(o => o.name === game.away_team)?.price;
+        const homeSpread = spread?.outcomes?.find(o => o.name === game.home_team);
+        const overTotal = total?.outcomes?.find(o => o.name === "Over");
+        const gameTime = new Date(game.commence_time);
+        const isLive = gameTime < new Date();
+        allGames.push({
+          id: game.id, sport: SPORT_LABELS[sport] || sport,
+          status: isLive ? "LIVE" : "UPCOMING",
+          time: isLive ? "LIVE" : gameTime.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZoneName: "short" }),
+          home: game.home_team, away: game.away_team,
+          homeML: homeML ? (homeML > 0 ? `+${homeML}` : `${homeML}`) : "N/A",
+          awayML: awayML ? (awayML > 0 ? `+${awayML}` : `${awayML}`) : "N/A",
+          spread: homeSpread ? `${game.home_team.split(" ").pop()} ${homeSpread.point > 0 ? "+" : ""}${homeSpread.point}` : "N/A",
+          total: overTotal ? `O/U ${overTotal.point}` : "N/A",
+        });
       });
-    });
-
-    oddsCache = { data: allGames, lastFetched: Date.now() };
-    return allGames;
-  } catch(e) {
-    console.error("Odds fetch error:", e.message);
-    if (oddsCache.data) return oddsCache.data;
-    throw e;
+    } catch (e) { console.error(`Error fetching ${sport}:`, e.message); }
   }
+
+  oddsCache = { data: allGames, lastFetched: Date.now() };
+  console.log(`Fetched ${allGames.length} games, cached for 30 minutes`);
+  return allGames;
 }
 
 async function requireAuth(req, res, next) {
